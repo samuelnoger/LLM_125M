@@ -25,7 +25,7 @@ class TrainConfig:
     eval_every: int = 500
     eval_batches: int = 20
     grad_accum_steps: int = 4
-    checkpoint_dir: str = "LLM/checkpoints/pretrain_125M"
+    checkpoint_dir: str = "LLM/checkpoints/"
     pretrained_path: str = ""
     warmup_steps: int = 1000
     
