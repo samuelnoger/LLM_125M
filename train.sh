@@ -9,8 +9,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # --- PRE-TRAINING DATASET SETTINGS ---
 # Switched to the massive educational dataset to teach the model English
 DATASET="fineweb-edu"  
-TRAIN_TOKEN_LIMIT=300000000  # Capped at 500M tokens for a reasonable MacBook run
-TRAIN_TOKEN_OFFSET=1000000000
+TRAIN_TOKEN_LIMIT=500000000  # Capped at 500M tokens for a reasonable MacBook run
+TRAIN_TOKEN_OFFSET=0
 TEXT_PATH=""
 VAL_FRACTION=0.1
 VAL_TOKEN_LIMIT=0
@@ -25,18 +25,18 @@ VOCAB_PAD_MULTIPLE=64
 DROPOUT=0.0            # Set to 0.0 for pre-training. You want it to memorize as much as possible right now.
 
 # --- PRE-TRAINING HYPERPARAMETERS ---
-BATCH_SIZE=2          # Stays at 4 to safely fit in your 12GB of Mac Unified Memory
+BATCH_SIZE=2          
 EPOCHS=1               # Pre-training only ever does 1 pass over massive data
-WARMUP_STEPS=1000      # CRITICAL: Increased heavily to prevent gradient explosions on random weights
+WARMUP_STEPS=2000      # CRITICAL: Increased heavily to prevent gradient explosions on random weights
 MAX_STEPS=0
-LEARNING_RATE=2e-4     # CRITICAL: The industry standard for ~125M parameter models
+LEARNING_RATE=2e-4    
 WEIGHT_DECAY=0.1
 GRAD_CLIP_NORM=1.0
 DEVICE="mps"           # Apple Silicon GPU
 LOG_EVERY=50
 EVAL_EVERY=500         # Increased to 500. Evaluating too often wastes time during pre-training
-CHECKPOINT_DIR="LLM/checkpoints/pretrain_125M_phase_3"
-PRETRAINED_PATH="LLM/checkpoints/pretrain_125M_phase_2/last.pt"     
+CHECKPOINT_DIR="LLM/checkpoints/pretrain_125M_phase_4"
+PRETRAINED_PATH="LLM/checkpoints/pretrain_125M_phase_3/last.pt"     
 GRAD_ACCUM_STEPS=128      
 
 if [[ ! -x "$PYTHON" ]]; then
