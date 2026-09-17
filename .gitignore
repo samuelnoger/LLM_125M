@@ -10,5 +10,6 @@ checkpoints/
 __pycache__/
 *.ipynb
 chat_app.py
+
 # Mac System Files
 .DS_Store

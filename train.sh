@@ -35,8 +35,8 @@ GRAD_CLIP_NORM=1.0
 DEVICE="mps"           # Apple Silicon GPU
 LOG_EVERY=50
 EVAL_EVERY=500         # Increased to 500. Evaluating too often wastes time during pre-training
-CHECKPOINT_DIR="LLM/checkpoints/pretrain_125M_phase_4"
-PRETRAINED_PATH="LLM/checkpoints/pretrain_125M_phase_3/last.pt"     
+CHECKPOINT_DIR="LLM/checkpoints/"
+PRETRAINED_PATH="LLM/checkpoints/"     
 GRAD_ACCUM_STEPS=128      
 
 if [[ ! -x "$PYTHON" ]]; then
