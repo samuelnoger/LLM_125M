@@ -22,10 +22,10 @@ The training loop is specifically configured to maximize hardware utilization on
 * `train.sh` - The bash executable for launching the training run with configured hyperparameters.
 
 ## How to Run
-Ensure your environment is set up with PyTorch configured for MPS/CUDA. 
+Ensure your environment is set up with PyTorch configured for MPS or CUDA. 
 
 1. Clone the repository.
-2. Install dependencies (see `requirements.txt`).
+2. Install the required packages (e.g., `pip install torch datasets transformers`).
 3. Execute the training script:
    ```bash
    ./train.sh
