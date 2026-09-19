@@ -29,3 +29,6 @@ Ensure your environment is set up with PyTorch configured for MPS or CUDA.
 3. Execute the training script:
    ```bash
    ./train.sh
+
+## Development Methodology
+The core Transformer architecture and PyTorch boilerplate for this model were scaffolded with the assistance of AI coding tools. My primary technical contributions focus on configuring the memory-efficient pre-training pipeline, optimizing hardware utilization for Apple Silicon (MPS) via gradient accumulation, hyperparameter tuning, and managing the end-to-end training loop on the FineWeb-Edu dataset.
