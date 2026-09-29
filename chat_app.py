@@ -14,7 +14,7 @@ if str(project_root) not in sys.path:
 
 import torch
 from compound_pipeline import CompoundOrchestrator
-from LLM.generate import iter_generate_tokens, load_checkpoint_bundle
+from LLM.utils import iter_generate_tokens, load_checkpoint_bundle
 
 
 class ChatApplication:
