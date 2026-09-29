@@ -24,11 +24,12 @@ The project demonstrates an end-to-end implementation from pre-training a SwiGLU
 
 ## Training, Datasets & Hardware Optimization
 
-The training loop maximizes Apple Silicon (device="mps") utilization through strict memory management.
+The training loop maximizes Apple Silicon (device="mps") utilization through strict memory management. Pre-training and SFT should be executed separately to ensure stability.
 
 * **Pre-Training:** Trained on the Hugging Face FineWeb-Edu dataset using a learning rate of 2e-4 with 2,000 warmup steps. The script leverages a micro-batch size of 2 with 128 gradient accumulation steps to yield an effective batch size of 256.
-* **Supervised Fine-Tuning (SFT):** The model weights are optimized for strict factual QA and summarization using a composite dataset of MS MARCO and XSum.
+* **Supervised Fine-Tuning (SFT):** Executed as a separate step after pre-training. The model weights are optimized for strict factual QA and summarization using a composite dataset of MS MARCO and XSum.
 * **Conversational Fallback:** A secondary set of weights trained exclusively on the Databricks Dolly dataset is documented for open-ended, creative chat where catastrophic forgetting of general world knowledge limits the strictly fine-tuned RAG weights.
+* **Auxiliary Model Training:** The DistilBERT extractor is fine-tuned independently from the generative model using the train_auxiliary_model.py script.
 
 ## Repository Structure
 
@@ -37,7 +38,8 @@ The training loop maximizes Apple Silicon (device="mps") utilization through str
 * **/utils/** - Utility scripts, including generate.py for headless inference and text generation.
 * **chat_app.py** - The Tkinter-based graphical interface managing the routing logic between Free Chat and RAG mode.
 * **compound_pipeline.py** - The orchestrator housing spaCy query rewriting and DistilBERT extraction logic.
-* **train.sh** - Bash executable for launching the training run with configured hyperparameters.
+* **train.sh** - Bash executable for launching the causal pre-training run.
+* **train_auxiliary_model.py** - Script for training the standalone DistilBERT extractor.
 
 ## How to Run
 
@@ -45,33 +47,16 @@ Ensure your environment is set up with PyTorch configured for MPS or CUDA.
 
 1. Clone the repository.
 2. Install the required dependencies:
-```bash
 pip install torch datasets transformers spacy
-
-```
-
-
 3. Download the necessary spaCy English language model:
-```bash
 python -m spacy download en_core_web_sm
-
-```
-
-
-4. Execute the training script:
-```bash
+4. Execute the pre-training script for the causal model:
 ./train.sh
-
-```
-
-
-5. Launch the conversational interface:
-```bash
+5. Run the Supervised Fine-Tuning (SFT) phase separately using your generated SFT scripts.
+6. Train the DistilBERT extractor model separately by running:
+python train_auxiliary_model.py
+7. Launch the conversational interface:
 python chat_app.py
-
-```
-
-
 
 ## Development Methodology
 
