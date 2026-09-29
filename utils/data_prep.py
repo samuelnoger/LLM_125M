@@ -36,120 +36,183 @@ def _get_or_train_bpe_tokenizer(texts: list[str], vocab_size: int = 32768) -> BP
     return tokenizer
 
 
-def prepare_dailydialog_corpus(
+from dataclasses import dataclass
+
+@dataclass
+class PreparedSFTCorpus:
+    tokenizer: BPETokenizerWrapper
+    train_tokens: torch.Tensor
+    train_labels: torch.Tensor
+    val_tokens: torch.Tensor
+    val_labels: torch.Tensor
+
+def prepare_synthesis_corpus(
     val_fraction: float = 0.1,
     vocab_size: int = 32768,
-) -> PreparedCorpus:
-    tokenizer_path = Path("LLM/checkpoints/bpe_tokenizer.json")
+    block_size: int = 512,
+) -> PreparedSFTCorpus:
+    tokenizer_path = Path("LLM/checkpoints/pretrain_125M_phase_4/tokenizer.json")
     if not tokenizer_path.exists():
-        raise FileNotFoundError(
-            f"Pre-trained tokenizer not found at {tokenizer_path}! "
-            "You must use the exact same tokenizer from your pre-training phase."
-        )
+        raise FileNotFoundError("Pre-trained tokenizer not found!")
     
-    # Load your existing pre-trained tokenizer
     tokenizer = load_bpe_tokenizer(tokenizer_path)
+    pad_token_id = tokenizer.tokenizer.token_to_id("<|endoftext|>")
+    if pad_token_id is None:
+        pad_token_id = 0
 
     try:
         from datasets import load_dataset
     except ImportError as exc:
         raise ImportError("Dataset loading requires the 'datasets' package.") from exc
 
-    # New cache file names so you don't overwrite your Dolly data
-    cache_file = Path("LLM/checkpoints/dailydialog_train_tokens.pt")
-    val_cache_file = Path("LLM/checkpoints/dailydialog_val_tokens.pt")
+    import random
 
-    if cache_file.exists() and val_cache_file.exists():
-        print(f"Loading cached DailyDialog tokens from {cache_file}...")
-        return PreparedCorpus(
-            tokenizer=tokenizer,
-            train_tokens=torch.load(cache_file),
-            val_tokens=torch.load(val_cache_file)
-        )
-
-    print("Loading daily_dialog dataset from Hugging Face...")
-    # trust_remote_code=True is often required for this specific dataset now
-    dataset = load_dataset("OpenRL/daily_dialog", split="train")
-
-    token_chunks = []
-    total_tokens = 0
-
-    for item in dataset:
-        dialog = item.get("dialog", [])
-        
-        # DailyDialog provides a list of conversation turns.
-        # We will loop through them in pairs. Turn 0 is User, Turn 1 is Assistant.
-        for i in range(0, len(dialog) - 1, 2):
-            user_text = dialog[i].strip()
-            assistant_text = dialog[i+1].strip()
-
-            if not user_text or not assistant_text:
-                continue
-
-            # Format it exactly how your chat app expects it
-            conversation_text = f"User: {user_text}\nAssistant: {assistant_text}<|endoftext|>"
-
-            ids = tokenizer.tokenizer.encode(conversation_text).ids
-            if not ids:
-                continue
-
-            chunk = torch.tensor(ids, dtype=torch.long)
-            token_chunks.append(chunk)
-            total_tokens += len(chunk)
-
-    if not token_chunks:
-        raise ValueError("No valid training pairs found in DailyDialog dataset.")
-
-    # Concatenate all conversations into one continuous 1D tensor
-    all_tokens = torch.cat(token_chunks)
+    cache_file = Path("LLM/checkpoints/synthesis_sft_train.pt")
     
-    # Split into train and validation sets
-    train_tokens, val_tokens = split_tokens(all_tokens, val_fraction=val_fraction)
+    if cache_file.exists():
+        print(f"Loading cached Synthesis SFT tensors from {cache_file}...")
+        cached_data = torch.load(cache_file)
+        return PreparedSFTCorpus(tokenizer=tokenizer, **cached_data)
 
-    # Cache them so you don't have to re-process next time
+    print("Building Synthesis Blend directly in memory (this may take a minute)...")
+    random.seed(42)
+    unified_data = []
+
+    # 1. Dolly 15k (All available context-based rows, up to 5000)
+    print("Fetching Dolly...")
+    dolly = load_dataset("databricks/databricks-dolly-15k", split="train")
+    dolly_with_context = dolly.filter(lambda x: x["context"] is not None and len(x["context"].strip()) > 0)
+    
+    # Dynamically select up to 5000, or the max available (4,467)
+    num_dolly = min(5000, len(dolly_with_context))
+    for row in dolly_with_context.shuffle(seed=42).select(range(num_dolly)):
+        unified_data.append((row["instruction"], row["context"], row["response"]))
+
+    # 2. XSum (5,000 rows)
+    print("Fetching XSum...")
+    xsum = load_dataset("EdinburghNLP/xsum", split="train")
+    
+    num_xsum = min(5000, len(xsum))
+    for row in xsum.shuffle(seed=42).select(range(num_xsum)):
+        unified_data.append(("Synthesize and summarize the following information.", row["document"], row["summary"]))
+
+    # 3. MS MARCO (10,000 rows via streaming)
+    print("Fetching MS MARCO (streaming)...")
+    ms_marco = load_dataset("microsoft/ms_marco", "v1.1", split="train", streaming=True)
+    marco_count = 0
+    for row in ms_marco:
+        if row["answers"] and len(row["answers"]) > 0:
+            selected_passages = [
+                p for p, is_sel in zip(row["passages"]["passage_text"], row["passages"]["is_selected"]) 
+                if is_sel == 1
+            ]
+            if selected_passages:
+                context = " ".join(selected_passages)
+                unified_data.append((row["query"], context, row["answers"][0]))
+                marco_count += 1
+        if marco_count >= 10000:
+            break
+
+    print(f"Shuffling merged dataset ({len(unified_data)} total samples)...")
+    random.shuffle(unified_data)
+
+    all_input_ids = []
+    all_labels = []
+
+    # --- THE FIX: We need sequence length block_size + 1 to perform the shift ---
+    target_len = block_size + 1
+
+    print("Tokenizing and padding sequences...")
+    for instruction, context, response in unified_data:
+        if not instruction or not response:
+            continue
+
+        prompt_text = f"User: {instruction.strip()}\nContext: {context.strip()}\nAssistant:"
+        response_text = f" {response.strip()}<|endoftext|>"
+
+        prompt_ids = tokenizer.tokenizer.encode(prompt_text).ids
+        response_ids = tokenizer.tokenizer.encode(response_text).ids
+
+        # NEW FIX: Ensure the prompt leaves at least 16 tokens for the response
+        if len(prompt_ids) >= block_size - 16:
+            continue
+
+        input_ids = prompt_ids + response_ids
+        labels = [-100] * len(prompt_ids) + response_ids
+
+        # Truncate to 513
+        input_ids = input_ids[:target_len]
+        labels = labels[:target_len]
+
+        # Pad to 513 if shorter
+        pad_len = target_len - len(input_ids)
+        if pad_len > 0:
+            input_ids.extend([pad_token_id] * pad_len)
+            labels.extend([-100] * pad_len) 
+
+        # Shift tokens
+        shifted_input_ids = input_ids[:-1]
+        shifted_labels = labels[1:]
+
+        all_input_ids.append(shifted_input_ids)
+        all_labels.append(shifted_labels)
+
+    inputs_tensor = torch.tensor(all_input_ids, dtype=torch.long)
+    labels_tensor = torch.tensor(all_labels, dtype=torch.long)
+
+    val_size = int(len(inputs_tensor) * val_fraction)
+    train_tokens = inputs_tensor[val_size:]
+    train_labels = labels_tensor[val_size:]
+    val_tokens = inputs_tensor[:val_size]
+    val_labels = labels_tensor[:val_size]
+
+    save_data = {
+        "train_tokens": train_tokens,
+        "train_labels": train_labels,
+        "val_tokens": val_tokens,
+        "val_labels": val_labels
+    }
+    
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(train_tokens, cache_file)
-    torch.save(val_tokens, val_cache_file)
-    print(f"Saved DailyDialog corpus: {len(train_tokens):,} train tokens, {len(val_tokens):,} val tokens.")
+    torch.save(save_data, cache_file)
+    print(f"Saved Synthesis SFT corpus: {len(train_tokens)} training sequences.")
 
-    return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)
-
+    return PreparedSFTCorpus(tokenizer=tokenizer, **save_data)
 
 def prepare_dolly_corpus(
     val_fraction: float = 0.1,
     vocab_size: int = 32768,
-) -> PreparedCorpus:
-    tokenizer_path = Path("LLM/checkpoints/bpe_tokenizer.json")
+    block_size: int = 512,
+) -> PreparedSFTCorpus:
+    tokenizer_path = Path("LLM/checkpoints/pretrain_125M_phase_4/tokenizer.json")
     if not tokenizer_path.exists():
-        raise FileNotFoundError(
-            f"Pre-trained tokenizer not found at {tokenizer_path}! "
-            "You must use the exact same tokenizer from your pre-training phase."
-        )
+        raise FileNotFoundError("Pre-trained tokenizer not found!")
     
-    # Load your existing pre-trained tokenizer (DO NOT RETRAIN)
     tokenizer = load_bpe_tokenizer(tokenizer_path)
+    pad_token_id = tokenizer.tokenizer.token_to_id("<|endoftext|>")
+    if pad_token_id is None:
+        pad_token_id = 0
 
     try:
         from datasets import load_dataset
     except ImportError as exc:
         raise ImportError("Dataset loading requires the 'datasets' package.") from exc
 
-    cache_file = Path("LLM/checkpoints/dolly_train_tokens.pt")
-    val_cache_file = Path("LLM/checkpoints/dolly_val_tokens.pt")
+    cache_file = Path("LLM/checkpoints/dolly_sft_train.pt")
+    
+    if cache_file.exists():
+        print(f"Loading cached Dolly SFT tensors from {cache_file}...")
+        cached_data = torch.load(cache_file)
+        return PreparedSFTCorpus(tokenizer=tokenizer, **cached_data)
 
-    if cache_file.exists() and val_cache_file.exists():
-        print(f"Loading cached Dolly-15k tokens from {cache_file}...")
-        return PreparedCorpus(
-            tokenizer=tokenizer,
-            train_tokens=torch.load(cache_file),
-            val_tokens=torch.load(val_cache_file)
-        )
-
-    print("Loading databricks/databricks-dolly-15k dataset from Hugging Face...")
+    print("Processing Dolly-15k dataset for SFT...")
     dataset = load_dataset("databricks/databricks-dolly-15k", split="train")
 
-    token_chunks = []
-    total_tokens = 0
+    all_input_ids = []
+    all_labels = []
+
+    # --- THE FIX: We need sequence length block_size + 1 to perform the shift ---
+    target_len = block_size + 1
 
     for item in dataset:
         instruction = item.get("instruction", "").strip()
@@ -159,36 +222,59 @@ def prepare_dolly_corpus(
         if not instruction or not response:
             continue
 
-        # Format strictly in order. Include context if Dolly provides it.
         if context:
-            conversation_text = f"User: {instruction}\nContext: {context}\nAssistant: {response}<|endoftext|>"
+            prompt_text = f"User: {instruction}\nContext: {context}\nAssistant:"
         else:
-            conversation_text = f"User: {instruction}\nAssistant: {response}<|endoftext|>"
+            prompt_text = f"User: {instruction}\nAssistant:"
+            
+        response_text = f" {response}<|endoftext|>"
 
-        ids = tokenizer.tokenizer.encode(conversation_text).ids
-        if not ids:
-            continue
+        prompt_ids = tokenizer.tokenizer.encode(prompt_text).ids
+        response_ids = tokenizer.tokenizer.encode(response_text).ids
 
-        chunk = torch.tensor(ids, dtype=torch.long)
-        token_chunks.append(chunk)
-        total_tokens += len(chunk)
+        input_ids = prompt_ids + response_ids
+        labels = [-100] * len(prompt_ids) + response_ids
 
-    if not token_chunks:
-        raise ValueError("No valid training pairs found in Dolly-15k dataset.")
+        # Truncate to 513
+        input_ids = input_ids[:target_len]
+        labels = labels[:target_len]
 
-    # Concatenate all conversations into one continuous 1D tensor
-    all_tokens = torch.cat(token_chunks)
+        # Pad to 513 if shorter
+        pad_len = target_len - len(input_ids)
+        if pad_len > 0:
+            input_ids.extend([pad_token_id] * pad_len)
+            labels.extend([-100] * pad_len) 
+
+        # THE CRITICAL SHIFT: 
+        # Inputs get tokens 0 to 511 (length 512)
+        # Labels get tokens 1 to 512 (length 512)
+        shifted_input_ids = input_ids[:-1]
+        shifted_labels = labels[1:]
+
+        all_input_ids.append(shifted_input_ids)
+        all_labels.append(shifted_labels)
+
+    inputs_tensor = torch.tensor(all_input_ids, dtype=torch.long)
+    labels_tensor = torch.tensor(all_labels, dtype=torch.long)
+
+    val_size = int(len(inputs_tensor) * val_fraction)
+    train_tokens = inputs_tensor[val_size:]
+    train_labels = labels_tensor[val_size:]
+    val_tokens = inputs_tensor[:val_size]
+    val_labels = labels_tensor[:val_size]
+
+    save_data = {
+        "train_tokens": train_tokens,
+        "train_labels": train_labels,
+        "val_tokens": val_tokens,
+        "val_labels": val_labels
+    }
     
-    # Split into train and validation sets
-    train_tokens, val_tokens = split_tokens(all_tokens, val_fraction=val_fraction)
-
-    # Cache them so you don't have to re-process next time
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(train_tokens, cache_file)
-    torch.save(val_tokens, val_cache_file)
-    print(f"Saved Dolly-15k corpus: {len(train_tokens):,} train tokens, {len(val_tokens):,} val tokens.")
+    torch.save(save_data, cache_file)
+    print(f"Saved Dolly SFT corpus: {len(train_tokens)} training sequences.")
 
-    return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)
+    return PreparedSFTCorpus(tokenizer=tokenizer, **save_data)
 
 def prepare_fineweb_edu_corpus(
     train_token_limit: int | None = 100_000_000,
@@ -319,118 +405,6 @@ def prepare_fineweb_edu_corpus(
 
     return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)
 
-def prepare_c4_corpus(
-    train_token_limit: int | None = 100_000_000,
-    val_token_limit: int | None = 5_000_000,
-    vocab_size: int = 32768,
-    train_token_offset: int = 0,
-) -> PreparedCorpus:
-    if train_token_limit is None or train_token_limit <= 0:
-        train_token_limit = 100_000_000
-    if val_token_limit is None or val_token_limit <= 0:
-        val_token_limit = 5_000_000
-
-    tokenizer_path = Path("LLM/checkpoints/bpe_tokenizer.json")
-    tokenizer = load_bpe_tokenizer(tokenizer_path)
-
-    cache_file = Path(f"LLM/checkpoints/c4_train_tokens_offset_{train_token_offset}_limit_{train_token_limit}.pt")
-    val_cache_file = Path("LLM/checkpoints/c4_val_tokens.pt")
-
-    # 1. Exact cache match (Instant load)
-    if cache_file.exists() and val_cache_file.exists():
-        print(f"Loading exact cached training tokens from {cache_file}...")
-        train_tokens = torch.load(cache_file)
-        val_tokens = torch.load(val_cache_file)
-        return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)
-
-    # 2. Smart Check: Can we reuse a smaller existing cache file if offset is 0?
-    base_tokens = None
-    actual_offset = train_token_offset
-    
-    if train_token_offset == 0:
-        checkpoint_dir = Path("LLM/checkpoints")
-        if checkpoint_dir.exists():
-            for cand in checkpoint_dir.glob("c4_train_tokens_offset_0_limit_*.pt"):
-                try:
-                    cached_limit = int(cand.stem.split("limit_")[1])
-                    # If we found a smaller cache than what we currently want
-                    if cached_limit < train_token_limit:
-                        print(f"Found existing smaller cache ({cached_limit / 1_000_000:.1f}M tokens). Reusing it...")
-                        base_tokens = torch.load(cand)
-                        actual_offset = cached_limit # Stream only the remainder!
-                        break
-                except (IndexError, ValueError):
-                    continue
-
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        raise ImportError("C4 loading requires the 'datasets' package.") from exc
-
-    def collect_tokens_from_stream(split: str, token_limit: int, token_offset: int = 0) -> torch.Tensor:
-        if token_limit is None or token_limit <= 0:
-            token_limit = 100_000_000 if split == "train" else 5_000_000
-
-        stream = load_dataset("allenai/c4", "en", split=split, streaming=True)
-        token_chunks = []
-        total_tokens = 0
-        skipped_tokens = 0
-        
-        print(f"Streaming from C4 ({split}) starting at offset {token_offset / 1_000_000:.1f}M...")
-        for item in stream:
-            text = clean_text(item["text"])
-            if not text:
-                continue
-                
-            ids = tokenizer.tokenizer.encode(text).ids
-            if not ids:
-                continue
-                
-            chunk_len = len(ids)
-            if skipped_tokens < token_offset:
-                if skipped_tokens + chunk_len <= token_offset:
-                    skipped_tokens += chunk_len
-                    continue
-                else:
-                    slice_idx = token_offset - skipped_tokens
-                    ids = ids[slice_idx:]
-                    skipped_tokens = token_offset
-            
-            chunk = torch.tensor(ids, dtype=torch.long)
-            token_chunks.append(chunk)
-            total_tokens += len(chunk)
-            
-            if total_tokens >= token_limit:
-                break
-                
-        if not token_chunks:
-            return torch.tensor([], dtype=torch.long)
-        return torch.cat(token_chunks)[:token_limit]
-
-    # Calculate how many *new* tokens we need to fetch for the remainder
-    if base_tokens is not None:
-        remainder_limit = train_token_limit - len(base_tokens)
-        if remainder_limit > 0:
-            new_tokens = collect_tokens_from_stream("train", remainder_limit, actual_offset)
-            train_tokens = torch.cat([base_tokens, new_tokens])
-        else:
-            train_tokens = base_tokens[:train_token_limit]
-    else:
-        train_tokens = collect_tokens_from_stream("train", train_token_limit, train_token_offset)
-
-    if val_cache_file.exists():
-        val_tokens = torch.load(val_cache_file)
-    else:
-        val_tokens = collect_tokens_from_stream("validation", val_token_limit)
-
-    # Save the new comprehensive cache file for future runs
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(train_tokens, cache_file)
-    torch.save(val_tokens, val_cache_file)
-    print(f"Saved updated token chunk to {cache_file}.")
-
-    return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)
-
 
 def load_text_files(paths: str | Path | Iterable[str | Path]) -> str:
     if isinstance(paths, (str, Path)):
@@ -487,48 +461,3 @@ def limit_tokens(token_ids: torch.Tensor, token_limit: int | None) -> torch.Tens
     if token_limit is None or token_limit <= 0:
         return token_ids
     return token_ids[: min(len(token_ids), token_limit)]
-
-
-def prepare_character_corpus(
-    paths: str | Path | Iterable[str | Path],
-    val_fraction: float = 0.1,
-    train_token_limit: int | None = None,
-    val_token_limit: int | None = None,
-    vocab_size: int = 32768,
-) -> PreparedCorpus:
-    text = clean_text(load_text_files(paths))
-    tokenizer = _get_or_train_bpe_tokenizer([text], vocab_size=vocab_size)
-    token_ids = tokenizer.encode(text)
-    train_tokens, val_tokens = split_tokens(token_ids, val_fraction=val_fraction)
-    train_tokens = limit_tokens(train_tokens, train_token_limit)
-    val_tokens = limit_tokens(val_tokens, val_token_limit)
-    return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)
-
-
-def _load_wikitext_split(split: str) -> str:
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        raise ImportError(
-            "WikiText-2 loading requires the 'datasets' package. Install it with 'pip install datasets'."
-        ) from exc
-
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split=split)
-    texts = [example["text"] for example in dataset if example["text"].strip()]
-    if not texts:
-        raise ValueError(f"WikiText-2 split '{split}' was empty")
-    return clean_text("\n\n".join(texts))
-
-
-def prepare_wikitext2_corpus(
-    train_token_limit: int | None = None,
-    val_token_limit: int | None = None,
-    vocab_size: int = 32768,
-) -> PreparedCorpus:
-    train_text = _load_wikitext_split("train")
-    val_text = _load_wikitext_split("validation")
-
-    tokenizer = _get_or_train_bpe_tokenizer([train_text, val_text], vocab_size=vocab_size)
-    train_tokens = limit_tokens(tokenizer.encode(train_text), train_token_limit)
-    val_tokens = limit_tokens(tokenizer.encode(val_text), val_token_limit)
-    return PreparedCorpus(tokenizer=tokenizer, train_tokens=train_tokens, val_tokens=val_tokens)

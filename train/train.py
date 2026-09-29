@@ -21,12 +21,9 @@ if __package__ in {None, ""}:
     from LLM.utils import (
         BPETokenizerWrapper,
         TextDataset,
-        prepare_character_corpus,
-        prepare_wikitext2_corpus,
-        prepare_c4_corpus,
         prepare_fineweb_edu_corpus,
         prepare_dolly_corpus,
-        prepare_dailydialog_corpus,
+        prepare_synthesis_corpus,
         save_bpe_tokenizer,
     )
     from LLM.utils.arguments import parse_train_args
@@ -36,12 +33,9 @@ else:
     from ..utils import (
         BPETokenizerWrapper,
         TextDataset,
-        prepare_character_corpus,
-        prepare_wikitext2_corpus,
-        prepare_c4_corpus,
         prepare_dolly_corpus,
         prepare_fineweb_edu_corpus,
-        prepare_dailydialog_corpus,
+        prepare_synthesis_corpus,
         save_bpe_tokenizer,
     )
     from ..utils.arguments import parse_train_args
@@ -76,39 +70,23 @@ def load_corpus(args: argparse.Namespace):
 
     if args.dataset == "dolly":
         return prepare_dolly_corpus()
-    
-    if args.dataset == "dailydialog":
-        return prepare_dailydialog_corpus()
 
-    if args.dataset == "wikitext2":
-        return prepare_wikitext2_corpus(
-            train_token_limit=train_token_limit,
-            val_token_limit=val_token_limit,
-        )
+    elif args.dataset == "synthesis":
+        return prepare_synthesis_corpus()
 
-    if args.dataset == "fineweb-edu":
+    elif args.dataset == "fineweb-edu":
         return prepare_fineweb_edu_corpus(
             train_token_limit=train_token_limit,
             val_token_limit=val_token_limit,
             train_token_offset=args.train_token_offset,
             subset="sample-10BT",
         )
-    
-    if args.dataset == "c4":
-        return prepare_c4_corpus(
-            train_token_limit=train_token_limit,
-            val_token_limit=val_token_limit,
-            train_token_offset=args.train_token_offset
-        )
 
-    if args.text_path is None:
+    elif args.text_path is None:
         raise ValueError("--text-path is required when --dataset local")
-    return prepare_character_corpus(
-        args.text_path,
-        val_fraction=args.val_fraction,
-        train_token_limit=train_token_limit,
-        val_token_limit=val_token_limit,
-    )
+
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}. Supported datasets: dolly, synthesis, fineweb-edu, local.")
 
 
 def pad_to_multiple(value: int, multiple: int) -> int:
@@ -140,7 +118,7 @@ def get_lr(
 
 
 def train(
-    token_ids: torch.Tensor,
+    corpus,
     vocab_size: int,
     tokenizer: BPETokenizerWrapper,
     model_config: ModelConfig,
@@ -149,7 +127,15 @@ def train(
     device = resolve_device(train_config.device)
     print(f"training device: {device}")
 
-    dataset = TextDataset(token_ids=token_ids, block_size=model_config.block_size)
+    from torch.utils.data import TensorDataset
+
+    # ROUTING LOGIC: Choose the dataset behavior based on the corpus type
+    if hasattr(corpus, "train_labels"): 
+        dataset = TensorDataset(corpus.train_tokens, corpus.train_labels)
+        print("Detected SFT Corpus: Using pre-padded sequences and -100 label masking.")
+    else:
+        dataset = TextDataset(token_ids=corpus.train_tokens, block_size=model_config.block_size)
+        print("Detected Pre-training Corpus: Using continuous block slicing.")
 
     loader = DataLoader(
         dataset,
@@ -264,6 +250,10 @@ def train(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.grad_clip_norm)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                
+                # CRITICAL MEMORY FIX: Flush the MPS cache after every update
+                if device.type == "mps":
+                    torch.mps.empty_cache()
 
             current_loss_val = (loss * grad_accum_steps).item()
             
@@ -331,9 +321,11 @@ def main() -> None:
 
     print(
         f"corpus ready: vocab_size={data_vocab_size} "
-        f"train_tokens={len(corpus.train_tokens)} val_tokens={len(corpus.val_tokens)}"
+        f"train_sequences/tokens={len(corpus.train_tokens)} val_sequences/tokens={len(corpus.val_tokens)}"
     )
-    train(corpus.train_tokens, data_vocab_size, corpus.tokenizer, model_config, train_config)
+    
+    # CRITICAL FIX: Pass the entire 'corpus' object so the train function can access both tokens and labels
+    train(corpus, data_vocab_size, corpus.tokenizer, model_config, train_config)
 
 
 if __name__ == "__main__":

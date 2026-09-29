@@ -5,7 +5,7 @@ import argparse
 
 def build_train_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train the LLM starter model")
-    parser.add_argument("--dataset", choices=("wikitext2", "c4", "fineweb-edu", "local", "dolly", "dailydialog"), default="wikitext2")
+    parser.add_argument("--dataset", choices=("wikitext2", "c4", "fineweb-edu", "local", "dolly", "dailydialog", "synthesis"), default="wikitext2")
     parser.add_argument("--text-path", type=str, default=None, help="Path to a .txt file or folder of text files")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation split for local text corpora")
     parser.add_argument("--train-token-limit", type=int, default=0, help="Optional cap on training tokens. 0 disables it")

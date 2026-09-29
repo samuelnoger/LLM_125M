@@ -9,7 +9,7 @@ venv/
 checkpoints/
 __pycache__/
 *.ipynb
-chat_app.py
+interface.py
 
 # Mac System Files
 .DS_Store

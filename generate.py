@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=50)  # Kept safer for 256 block size
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=40)
-    parser.add_argument("--repetition-penalty", type=float, default=1.15)  # <--- Added repetition penalty arg
+    parser.add_argument("--repetition-penalty", type=float, default=1.15)  
     parser.add_argument("--device", type=str, default="auto")
     return parser.parse_args()
 
@@ -57,15 +57,16 @@ def load_checkpoint_bundle(checkpoint_dir: str | Path, device: str = "auto") -> 
 def apply_repetition_penalty(logits: torch.Tensor, tokens: torch.Tensor, penalty: float) -> torch.Tensor:
     if penalty == 1.0:
         return logits
+    
     logits = logits.clone()
-    for i in range(logits.size(0)):
-        unique_tokens = tokens[i].unique()
-        for token_id in unique_tokens:
-            score = logits[i, token_id]
-            if score < 0:
-                logits[i, token_id] = score * penalty
-            else:
-                logits[i, token_id] = score / penalty
+    # Gather logits corresponding to tokens that have already appeared
+    scores = torch.gather(logits, dim=1, index=tokens)
+    
+    # Penalize: positive scores get smaller, negative scores become more negative
+    penalized_scores = torch.where(scores < 0, scores * penalty, scores / penalty)
+    
+    # Scatter the updated values back in place on the GPU in one operation
+    logits.scatter_(dim=1, index=tokens, src=penalized_scores)
     return logits
 
 
@@ -89,17 +90,22 @@ def iter_generate_tokens(
     max_new_tokens: int,
     temperature: float,
     top_k: int,
-    repetition_penalty: float = 1.15,  # <--- Add default value here
+    repetition_penalty: float = 1.15,
 ) -> Iterator[torch.Tensor]:
     model.eval()
+    prompt_len = prompt_tokens.shape[1]  # Track the length of the protected context
     tokens = prompt_tokens.clone()
     yield tokens
+    
     for _ in range(max_new_tokens):
         context = tokens[:, -model.config.block_size :]
         logits, _ = model(context)
         next_token_logits = logits[:, -1, :]
         
-        next_token_logits = apply_repetition_penalty(next_token_logits, tokens, repetition_penalty)
+        # --- THE FIX: Only penalize tokens the model actually generated ---
+        generated_tokens = tokens[:, prompt_len:]
+        if generated_tokens.size(1) > 0:
+            next_token_logits = apply_repetition_penalty(next_token_logits, generated_tokens, repetition_penalty)
         
         valid_vocab_size = getattr(model, "valid_vocab_size", next_token_logits.size(-1))
         next_token = sample_next_token(
@@ -119,7 +125,7 @@ def generate_text(
     max_new_tokens: int,
     temperature: float,
     top_k: int,
-    repetition_penalty: float = 1.15,  # <--- Add default value here too
+    repetition_penalty: float = 1.15,  
 ) -> torch.Tensor:
     tokens = prompt_tokens.clone()
     for tokens in iter_generate_tokens(
