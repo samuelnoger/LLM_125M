@@ -31,16 +31,6 @@ The training loop maximizes Apple Silicon (device="mps") utilization through str
 * **Conversational Fallback:** A secondary set of weights trained exclusively on the Databricks Dolly dataset is documented for open-ended, creative chat where catastrophic forgetting of general world knowledge limits the strictly fine-tuned RAG weights.
 * **Auxiliary Model Training:** The DistilBERT extractor is fine-tuned independently from the generative model using the train_auxiliary_model.py script.
 
-## Repository Structure
-
-* **/LLM/train/** - Main PyTorch training loop, tokenization, gradient accumulation, and evaluation logic.
-* **/LLM/model/** - Neural network architecture (Transformer blocks, Attention mechanisms, SwiGLU).
-* **/utils/** - Utility scripts, including generate.py for headless inference and text generation.
-* **chat_app.py** - The Tkinter-based graphical interface managing the routing logic between Free Chat and RAG mode.
-* **compound_pipeline.py** - The orchestrator housing spaCy query rewriting and DistilBERT extraction logic.
-* **train.sh** - Bash executable for launching the causal pre-training run.
-* **train_auxiliary_model.py** - Script for training the standalone DistilBERT extractor.
-
 ## How to Run
 
 Ensure your environment is set up with PyTorch configured for MPS or CUDA.
