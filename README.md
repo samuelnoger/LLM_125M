@@ -46,24 +46,17 @@ The training loop maximizes Apple Silicon (device="mps") utilization through str
 Ensure your environment is set up with PyTorch configured for MPS or CUDA.
 
 1. Clone the repository.
-2. Install the required dependencies:
-```bash
-pip install torch datasets transformers spacy
-```
-4. Download the necessary spaCy English language model:
-```bash
-python -m spacy download en_core_web_sm
-```
-6. Execute the pre-training script for the causal model:
+2. Install the required dependencies.
+3. Execute the pre-training script for the causal model:
 ```bash
 ./train.sh
 ```
-8. Run the Supervised Fine-Tuning (SFT) phase separately using the same script with adjusted parameters.
-9. Train the DistilBERT extractor model separately by running:
+4. Run the Supervised Fine-Tuning (SFT) phase separately using the same script with adjusted parameters.
+5. Train the DistilBERT extractor model separately by running:
 ```bash
 python train_auxiliary_model.py
 ```
-11. Launch the conversational interface:
+6. Launch the conversational interface:
 ```bash
 python chat_app.py
 ```
