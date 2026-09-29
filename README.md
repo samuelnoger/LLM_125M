@@ -47,16 +47,26 @@ Ensure your environment is set up with PyTorch configured for MPS or CUDA.
 
 1. Clone the repository.
 2. Install the required dependencies:
+```bash
 pip install torch datasets transformers spacy
-3. Download the necessary spaCy English language model:
+```
+4. Download the necessary spaCy English language model:
+```bash
 python -m spacy download en_core_web_sm
-4. Execute the pre-training script for the causal model:
+```
+6. Execute the pre-training script for the causal model:
+```bash
 ./train.sh
-5. Run the Supervised Fine-Tuning (SFT) phase separately using your generated SFT scripts.
-6. Train the DistilBERT extractor model separately by running:
+```
+8. Run the Supervised Fine-Tuning (SFT) phase separately using the same script with adjusted parameters.
+9. Train the DistilBERT extractor model separately by running:
+```bash
 python train_auxiliary_model.py
-7. Launch the conversational interface:
+```
+11. Launch the conversational interface:
+```bash
 python chat_app.py
+```
 
 ## Development Methodology
 
